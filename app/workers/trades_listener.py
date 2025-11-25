@@ -19,6 +19,12 @@ except ImportError as e:
     logger.critical(f"Erreur d'importation : {e}. Vérifiez votre PYTHONPATH.")
     sys.exit(1)
 
+MAX_RECONNECT_ATTEMPTS = 10
+INITIAL_RECONNECT_DELAY = 1 
+MAX_RECONNECT_DELAY = 60
+HEARTBEAT_INTERVAL = 30
+HEARTBEAT_TIMEOUT = 90
+
 class TradesListener:
     def __init__(self):
         self.users_list = settings.USERS_LISTENED
@@ -27,9 +33,14 @@ class TradesListener:
         self.subscriptions: Dict[str, int] = {}
         self.msg_queue = queue.Queue()
         self.running = True
+        self.connected = False
+        
+        self.reconnect_count = 0
+        self.last_message_time = time.time()
         
         self.telegram_service = TelegramService()
-        self.worker_thread = threading.Thread(target=self._notification_worker, daemon=True)
+        self.notification_thread = threading.Thread(target=self._notification_worker, daemon=True)
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_monitor, daemon=True)
 
     def start(self):
         logger.info("-----------------------------------------------------")
@@ -40,27 +51,108 @@ class TradesListener:
             logger.error("Aucune adresse trouvée dans USERS_LISTENED.")
             return
 
-        try:
-            self.info_client = Info(constants.MAINNET_API_URL, skip_ws=False)
-        except Exception as e:
-            logger.critical(f"Impossible d'initialiser le client Info : {e}")
+        self.notification_thread.start()
+        self.heartbeat_thread.start()
+
+        if not self._connect():
+            logger.error("Impossible de se connecter initialement. Abandon.")
             return
 
-        self.worker_thread.start()
-
-        logger.info(f"Abonnement aux trades de {len(self.users_list)} adresse(s).")
-        for addr in self.users_list:
-            try:
-                sub_id = self.info_client.subscribe(
-                    {"type": "userFills", "user": addr},
-                    self._on_message_received
-                )
-                self.subscriptions[addr] = sub_id
-                logger.info(f"-> Abonné: {addr[:10]}...")
-            except Exception as e:
-                logger.error(f"Erreur d'abonnement pour {addr}: {e}")
-
         self._wait_loop()
+
+    def _connect(self) -> bool:
+        try:
+            logger.info("Connexion au WebSocket Hyperliquid...")
+            self.info_client = Info(constants.MAINNET_API_URL, skip_ws=False)
+            
+            logger.info(f"Abonnement aux trades de {len(self.users_list)} adresse(s)...")
+            self.subscriptions.clear()
+            
+            for addr in self.users_list:
+                try:
+                    sub_id = self.info_client.subscribe(
+                        {"type": "userFills", "user": addr},
+                        self._on_message_received
+                    )
+                    self.subscriptions[addr] = sub_id
+                    logger.info(f"  ✓ Abonné: {addr[:10]}...")
+                except Exception as e:
+                    logger.error(f"  ✗ Erreur d'abonnement pour {addr}: {e}")
+                    return False
+            
+            self.connected = True
+            self.reconnect_count = 0
+            self.last_message_time = time.time()
+            logger.info(f"✓ Connexion établie, {len(self.subscriptions)} abonnements actifs")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la connexion: {e}", exc_info=True)
+            self.connected = False
+            return False
+
+    def _reconnect(self):
+        while self.running and self.reconnect_count < MAX_RECONNECT_ATTEMPTS:
+            self.reconnect_count += 1
+            delay = min(
+                INITIAL_RECONNECT_DELAY * (2 ** (self.reconnect_count - 1)),
+                MAX_RECONNECT_DELAY
+            )
+            
+            logger.warning(
+                f"Tentative de reconnexion {self.reconnect_count}/{MAX_RECONNECT_ATTEMPTS} "
+                f"dans {delay}s..."
+            )
+            time.sleep(delay)
+            
+            self._close_connection()
+            
+            if self._connect():
+                logger.info("✓ Reconnexion réussie !")
+                return
+            
+            logger.error(f"✗ Échec de la tentative {self.reconnect_count}")
+        
+        if self.reconnect_count >= MAX_RECONNECT_ATTEMPTS:
+            logger.critical(
+                f"Échec après {MAX_RECONNECT_ATTEMPTS} tentatives de reconnexion. Arrêt du worker."
+            )
+            self.stop()
+
+    def _heartbeat_monitor(self):
+        while self.running:
+            time.sleep(HEARTBEAT_INTERVAL)
+            
+            if not self.connected:
+                continue
+            
+            time_since_last_message = time.time() - self.last_message_time
+            
+            if time_since_last_message > HEARTBEAT_TIMEOUT:
+                logger.warning(
+                    f"Aucun message reçu depuis {time_since_last_message:.0f}s "
+                    f"(timeout: {HEARTBEAT_TIMEOUT}s). Vérification de la connexion..."
+                )
+                
+                self.connected = False
+                self._reconnect()
+
+    def _close_connection(self):
+        if not self.info_client:
+            return
+        
+        try:
+            for addr, sub_id in self.subscriptions.items():
+                try:
+                    self.info_client.unsubscribe({"type": "userFills", "user": addr}, sub_id)
+                except Exception:
+                    pass
+            
+            if hasattr(self.info_client, 'ws_manager') and self.info_client.ws_manager:
+                if hasattr(self.info_client.ws_manager, 'ws'):
+                    self.info_client.ws_manager.ws.close()
+        except Exception as e:
+            logger.debug(f"Erreur lors de la fermeture de connexion: {e}")
 
     def _wait_loop(self):
         def signal_handler(sig, frame):
@@ -75,33 +167,29 @@ class TradesListener:
         try:
             while self.running:
                 time.sleep(1)
+                
+                if not self.connected and self.reconnect_count == 0:
+                    logger.warning("Déconnexion détectée, tentative de reconnexion...")
+                    self._reconnect()
+                    
         except Exception as e:
             logger.error(f"Erreur inattendue dans la boucle principale : {e}")
             self.stop()
 
     def stop(self):
         self.running = False
+        self.connected = False
         logger.info("Arrêt en cours...")
         
-        if self.info_client:
-            for addr, sub_id in self.subscriptions.items():
-                try:
-                    self.info_client.unsubscribe({"type": "userFills", "user": addr}, sub_id)
-                except Exception:
-                    pass
-            
-            try:
-                if hasattr(self.info_client, 'ws_manager') and self.info_client.ws_manager:
-                     if hasattr(self.info_client.ws_manager, 'ws'):
-                        self.info_client.ws_manager.ws.close()
-            except Exception as e:
-                logger.warning(f"Erreur lors de la fermeture WS: {e}")
-
+        self._close_connection()
+        
         logger.info("Worker terminé.")
         os._exit(0)
 
     def _on_message_received(self, message: Dict[str, Any]):
         try:
+            self.last_message_time = time.time()
+            
             data = message.get("data") or {}
             
             if data.get("isSnapshot"):

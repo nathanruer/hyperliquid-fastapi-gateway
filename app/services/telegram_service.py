@@ -1,5 +1,14 @@
 import requests
+import logging
 from typing import Dict, Any, Optional
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
+
 from app.core.config import settings
 from app.core.logger import setup_logger
 
@@ -45,6 +54,16 @@ class TelegramService:
             f"💵 PnL réalisé : {closed_pnl} $"
         )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.ChunkedEncodingError
+        )),
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
     def _send_message(self, message_text: str):
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         payload = {
@@ -56,9 +75,25 @@ class TelegramService:
 
         try:
             response = requests.post(url, json=payload, timeout=5)
-            if response.status_code != 200:
-                logger.error(f"Erreur API Telegram ({response.status_code}): {response.text}")
+            
+            # Don't retry on client errors (4xx) - these are permanent
+            if 400 <= response.status_code < 500:
+                logger.error(
+                    f"Telegram client error ({response.status_code}): {response.text}. "
+                    f"This is a permanent error, not retrying."
+                )
+                return
+            
+            # Raise exception for 5xx errors to trigger retry
+            if response.status_code >= 500:
+                logger.warning(f"Telegram server error ({response.status_code}), will retry...")
+                response.raise_for_status()
+            
+            if response.status_code == 200:
+                logger.debug("Telegram message sent successfully")
+            
         except requests.exceptions.RequestException as e:
-            logger.error(f"Exception réseau Telegram : {e}")
+            logger.warning(f"Network error sending Telegram message: {e}")
+            raise
         except Exception as e:
-            logger.error(f"Erreur inattendue lors de l'envoi Telegram : {e}")
+            logger.error(f"Unexpected error sending Telegram message: {e}", exc_info=True)

@@ -1,15 +1,16 @@
-fastapi==0.115.5
-uvicorn[standard]==0.32.1
-pydantic==2.10.3
-hyperliquid-python-sdk==0.20.1
+fastapi==0.115.6
+uvicorn==0.34.0
+hyperliquid-python-sdk==0.3.9
+pydantic==2.10.4
 eth-account==0.13.4
 eth-utils==5.1.0
 python-dotenv==1.0.1
-requests==2.32.5
+requests==2.32.3
 slowapi==0.1.9
+tenacity==8.2.3
 
-# Development dependencies
-pytest==8.3.4
-pytest-asyncio==0.24.0
-pytest-cov==6.0.0
-httpx==0.28.1
+# Dev dependencies (optionnel)
+# pytest==8.3.4
+# pytest-asyncio==0.24.0
+# pytest-cov==6.0.0
+# httpx==0.28.1

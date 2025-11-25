@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Dict, Any
+from datetime import datetime
 
 class MarginSummary(BaseModel):
     accountValue: str
@@ -54,3 +55,21 @@ class OrderResponse(BaseModel):
     status: str
     filled_orders: List[OrderFillDetail]
     errors: List[str]
+
+
+# ==================== Health Check Models ====================
+
+class ServiceStatus(BaseModel):
+    """Status of an individual service."""
+    status: str = Field(..., description="Service status: 'up', 'down', or 'degraded'")
+    message: Optional[str] = Field(None, description="Additional status information")
+
+
+class HealthResponse(BaseModel):
+    """Detailed health check response."""
+    status: str = Field(..., description="Overall system status: 'healthy', 'degraded', or 'unhealthy'")
+    api: ServiceStatus = Field(..., description="API service status")
+    exchange: ServiceStatus = Field(..., description="Hyperliquid exchange connection status")
+    uptime_seconds: float = Field(..., description="Application uptime in seconds")
+    version: str = Field(..., description="Application version")
+    timestamp: str = Field(..., description="Current timestamp (ISO 8601)")
