@@ -1,11 +1,21 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
 from app.models.schemas import UserStateResponse
 from app.services.hyperliquid_service import hyperliquid_service as hs
 
 router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
 
-@router.get("/user/{address}", response_model=UserStateResponse)
-async def get_user_state_by_address(address: str):
+@router.get(
+    "/user/{address}",
+    response_model=UserStateResponse,
+    summary="Récupérer l'état d'un utilisateur",
+    description="Consulte l'état d'un compte (positions, margin, valeur du portefeuille). Endpoint public avec rate limiting."
+)
+@limiter.limit("60/minute")
+async def get_user_state_by_address(request: Request, address: str):
     try:
         user_state = hs.get_user_state(address)
         if not user_state:

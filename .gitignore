@@ -38,3 +38,11 @@ ENV/
 Thumbs.db
 
 *.log
+
+# Test coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+*.cover
+.hypothesis/
